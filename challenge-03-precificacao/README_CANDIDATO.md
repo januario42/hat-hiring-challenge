@@ -1,5 +1,9 @@
 # Motor de Precificação de Propostas — HAT Challenge 03
 
+API REST para criação, validação e aprovação de propostas comerciais de Professional Services, com motor de precificação automático, máquina de estados e desconto em cascata com histórico de aprovações.
+
+---
+
 ## Como rodar o projeto
 
 ### Com Docker (recomendado)
@@ -8,19 +12,21 @@
 docker-compose up --build
 ```
 
-A API estará disponível em `http://localhost:8000`.
-Documentação interativa em `http://localhost:8000/docs`.
+- API: `http://localhost:8000`
+- Documentação interativa: `http://localhost:8000/docs`
 
 ### Sem Docker
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-source .venv/bin/activate  # Linux/Mac
+.venv\Scripts\activate       # Windows
+source .venv/bin/activate    # Linux/Mac
 
 pip install -e ".[dev]"
 uvicorn main:app --reload
 ```
+
+---
 
 ## Como popular o banco
 
@@ -28,7 +34,9 @@ uvicorn main:app --reload
 python -m src.infra.seed
 ```
 
-Insere 10 propostas realistas com profissionais de diferentes senioridades.
+Insere 10 propostas realistas com profissionais de diferentes senioridades e clientes como Itaú, Nubank, Embraer e Petrobras.
+
+---
 
 ## Como rodar os testes
 
@@ -36,40 +44,57 @@ Insere 10 propostas realistas com profissionais de diferentes senioridades.
 pytest src/tests/ -v
 ```
 
-21 testes, cobertura de 97.50%.
+21 testes — cobertura de **97.50%**.
+
+---
+
+## Endpoints disponíveis
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/propostas` | Cria e valida uma proposta |
+| `GET` | `/propostas` | Lista propostas com filtros opcionais |
+| `GET` | `/propostas/{id}` | Detalhe de uma proposta |
+| `POST` | `/propostas/{id}/aplicar-desconto` | Aplica desconto com validação hierárquica |
+| `GET` | `/tabela-precos` | Retorna a tabela de preços vigente |
+
+---
 
 ## Fluxo de estados da proposta
 
-Ao criar uma proposta, o status é definido automaticamente pela margem bruta:
+O status é definido automaticamente na criação com base na margem bruta calculada:
 
-| Margem bruta | Status atribuído |
+| Margem bruta | Status |
 |---|---|
-| Acima de 45% | APROVADA |
-| Entre 40% e 45% | PENDENTE |
-| Abaixo de 40% | REPROVADA |
+| Acima de 45% | `APROVADA` |
+| Entre 40% e 45% | `PENDENTE` |
+| Abaixo de 40% | `REPROVADA` |
 
-- **APROVADA** → margem acima de 45%. Não pode voltar para PENDENTE sem evento explícito.
-- **PENDENTE** → margem entre 40% e 45%. Requer aprovação manual com desconto hierárquico.
-- **REPROVADA** → margem abaixo de 40%. Pode ser reeditada, mas não enviada ao cliente.
+**Regras de transição:**
+- `APROVADA` → não pode voltar para `PENDENTE` sem evento explícito de rejeição
+- `PENDENTE` → pode receber desconto hierárquico para ser aprovada manualmente
+- `REPROVADA` → pode ser reeditada, mas nunca enviada ao cliente
+
+---
 
 ## Decisões de Arquitetura
 
-### Stack: Python/FastAPI em vez de Node.js/TypeScript
-O repositório sugeria Python como stack base. Optei por manter a sugestão para alinhar com o contexto de IA aplicada da HAT Thinking, onde Python é dominante. A familiaridade com TypeScript me ajudou a entender os tipos e schemas rapidamente.
+### Stack: Python/FastAPI
+O repositório sugeria Python como stack base. Optei por manter para alinhar com o contexto de IA aplicada da HAT Thinking, onde Python é dominante. A familiaridade com TypeScript/Node.js me ajudou a entender os contratos de tipos e schemas rapidamente.
 
-### Decimal em vez de float para valores monetários
-`float` usa representação binária de ponto flutuante, o que causa erros de arredondamento em operações financeiras. Exemplo concreto: `0.1 + 0.2 == 0.30000000000000004` em Python. Em um motor de precificação, esse erro acumulado em centenas de linhas de proposta pode resultar em margens calculadas incorretamente. `Decimal` usa aritmética de ponto fixo e garante precisão exata.
+### `Decimal` em vez de `float` para valores monetários
+`float` usa representação binária de ponto flutuante, causando erros de arredondamento. Exemplo: `0.1 + 0.2 == 0.30000000000000004` em Python. Em um motor de precificação, esse erro acumulado em centenas de linhas pode resultar em margens calculadas incorretamente. `Decimal` usa aritmética de ponto fixo e garante precisão exata.
 
-### Separação de models e schemas
-`models.py` representa as tabelas do banco — incluem campos como `created_at`, `proposta_id`, e relacionamentos que não devem ser expostos diretamente na API. `schemas.py` representa os contratos de entrada e saída da API — o que o cliente envia e recebe. Essa separação segue o princípio de Single Responsibility e evita vazar detalhes de infraestrutura para o contrato público.
+### Separação de `models` e `schemas`
+`models.py` representa as tabelas do banco — expõe campos internos como `proposta_id`, `created_at` e relacionamentos que não devem vazar para a API. `schemas.py` representa os contratos públicos de entrada e saída. Essa separação segue Single Responsibility e protege o contrato da API de mudanças internas no banco.
 
 ### Desconto em cascata com histórico imutável
-Cada aplicação de desconto cria um registro `Aprovacao` no banco com quem aprovou, quanto desconto aplicou e quando. O total acumulado é sempre recalculado somando o histórico — nunca editando registros existentes. Isso garante auditabilidade completa e evita o bug clássico de sistemas de vendas onde o estado acumulado é perdido após uma atualização.
+Cada desconto aplicado cria um registro `Aprovacao` no banco — quem aprovou, quanto aplicou e quando. O total acumulado é sempre recalculado somando o histórico, nunca editando registros existentes. Isso garante auditabilidade completa e evita o bug clássico onde o estado acumulado é perdido após uma atualização.
 
-### Funções auxiliares `_build_proposta_output`, `_build_breakdown`, `_build_aprovacoes`
-O SQLModel com SQLite retorna valores `Decimal` com precisão variável após persistência. Para garantir serialização consistente (`450.00` em vez de `450.0000000000`), centralizei a construção do output em funções auxiliares que aplicam `quantize(Decimal("0.01"))` em todos os campos financeiros. Isso elimina duplicação e garante consistência em todos os endpoints.
+### Funções auxiliares `_build_*` no router
+O SQLModel com SQLite retorna `Decimal` com precisão variável após persistência (`450.0000000000` em vez de `450.00`). Centralizei a construção do output em funções auxiliares que aplicam `quantize(Decimal("0.01"))` em todos os campos financeiros, eliminando duplicação e garantindo consistência em todos os endpoints.
 
 ### Testes
-- **Testes de unidade** (`test_precificacao`, `test_validacao`, `test_desconto`): testam a lógica de negócio pura, sem banco, sem HTTP.
-- **Testes de integração** (`test_api`): testam os endpoints de ponta a ponta com banco SQLite em memória via `TestClient` do FastAPI.
-- Cobertura final: **97.50%**.
+- **Unidade** (`test_precificacao`, `test_validacao`, `test_desconto`): lógica de negócio pura, sem banco e sem HTTP
+- **Integração** (`test_api`): endpoints de ponta a ponta com banco SQLite em memória via `TestClient`
+- Cobertura final: **97.50%**
